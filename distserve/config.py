@@ -4,7 +4,8 @@ import torch
 from transformers import AutoConfig
 
 from distserve.utils import GB
-
+from dataclasses import dataclass
+from pathlib import Path
 
 class CacheConfig:
     """Configuration for the key-value cache.
@@ -302,3 +303,9 @@ class ModelConfig:
             + 5 * self.get_num_layers(parallel_config) * self.get_hidden_size()  # bias
         ) 
         return total_params * self.get_dtype_size()
+
+
+@dataclass
+class AlgoConfig:
+    """Scheduling algorithm"""
+    priority_sjf_oracle_path: Path | None = None

@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Dict, AsyncGenerator
 import asyncio
 import math
 import argparse
+from pathlib import Path
 
 import ray
 from ray.util.placement_group import PlacementGroup
@@ -12,6 +13,7 @@ from distserve.config import (
     ModelConfig, 
     DisaggParallelConfig, 
     ParallelConfig, 
+    AlgoConfig,
     CacheConfig, 
     ContextStageSchedConfig,
     DecodingStageSchedConfig
@@ -88,7 +90,8 @@ class LLMEngine:
         disagg_parallel_config: DisaggParallelConfig,
         cache_config: CacheConfig,
         context_sched_config: ContextStageSchedConfig,
-        decoding_sched_config: DecodingStageSchedConfig
+        decoding_sched_config: DecodingStageSchedConfig,
+        algo_config: AlgoConfig,
     ):
         self.model_config = model_config
         self.disagg_parallel_config = disagg_parallel_config
@@ -331,4 +334,6 @@ def add_engine_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument("--simulator-mode", action="store_true")
     parser.add_argument("--profiler-data-path", type=str, default=None)
     parser.add_argument("--gpu-mem-size-gb", type=float, default=None)
+
+    parser.add_argument("--priority-sjf-oracle-path", type=Path, default=None)
     

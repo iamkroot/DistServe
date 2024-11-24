@@ -10,6 +10,7 @@ from distserve.config import (
     ParallelConfig,
     CacheConfig,
     DisaggParallelConfig,
+    AlgoConfig,
     ContextStageSchedConfig,
     DecodingStageSchedConfig
 )
@@ -36,14 +37,16 @@ class OfflineLLM:
         disagg_parallel_config: DisaggParallelConfig,
         cache_config: CacheConfig,
         context_sched_config: ContextStageSchedConfig,
-        decoding_sched_config: DecodingStageSchedConfig
+        decoding_sched_config: DecodingStageSchedConfig,
+        algo_config: AlgoConfig,
     ):
         self.engine = LLMEngine(
             model_config,
             disagg_parallel_config,
             cache_config,
             context_sched_config,
-            decoding_sched_config
+            decoding_sched_config,
+            algo_config
         )
         
         asyncio.run(self.engine.initialize())
@@ -106,14 +109,16 @@ class AsyncLLM:
         disagg_parallel_config: DisaggParallelConfig,
         cache_config: CacheConfig,
         context_sched_config: ContextStageSchedConfig,
-        decoding_sched_config: DecodingStageSchedConfig
+        decoding_sched_config: DecodingStageSchedConfig,
+        algo_config: AlgoConfig
     ):
         self.engine = LLMEngine(
             model_config,
             disagg_parallel_config,
             cache_config,
             context_sched_config,
-            decoding_sched_config
+            decoding_sched_config,
+            algo_config
         )
         
         asyncio.run(self.engine.initialize())
@@ -156,7 +161,8 @@ class AsyncLLM:
                 max_tokens_per_batch=args.decoding_max_tokens_per_batch,
                 model_name=args.model,
                 waiting_block_prop_threshold=0.05
-            )
+            ),
+            algo_config=AlgoConfig(priority_sjf_oracle_path=args.priority_sjf_oracle_path)
         )
 
     async def start_event_loop(self):

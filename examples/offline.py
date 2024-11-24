@@ -6,7 +6,8 @@ from distserve.config import (
     ParallelConfig,
     CacheConfig,
     ContextStageSchedConfig,
-    DecodingStageSchedConfig
+    DecodingStageSchedConfig,
+    AlgoConfig
 )
 
 parser = argparse.ArgumentParser()
@@ -58,7 +59,8 @@ llm = OfflineLLM(
         policy="fcfs",
         max_batch_size=4,
         max_tokens_per_batch=16384
-    )
+    ),
+    algo_config=AlgoConfig()
 )
 
 # Generate texts from the prompts. The output is a list of Request objects
