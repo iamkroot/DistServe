@@ -3,9 +3,11 @@ import copy
 from typing import List, Optional, Tuple, Dict, AsyncGenerator
 import asyncio
 import math
+import pickle
 import argparse
 from pathlib import Path
 
+import hashlib
 import ray
 from ray.util.placement_group import PlacementGroup
 
@@ -148,6 +150,10 @@ class LLMEngine:
         self.request_lifetime_events: Dict[int, List[LifetimeEvent]] = {}
         
         self.engine_initialized = False
+        if self.context_sched_config.policy == "priority-sjf" or self.decoding_sched_config.policy == "priority-sjf":
+            assert algo_config.priority_sjf_oracle_path is not None
+            with open(algo_config.priority_sjf_oracle_path, 'rb') as f:
+                self.priority_map = pickle.load(f)
     
     def _on_new_step_output_callback(self, request_id: int, step_output: StepOutput):
         """
@@ -281,6 +287,14 @@ class LLMEngine:
             arrival_time,
             request_id,
         )
+        if self.context_sched_config.policy == "priority-sjf" or self.decoding_sched_config.policy == "priority-sjf":
+            try:
+                req.set_priority(self.priority_map[hashlib.md5(req.prompt.encode()).hexdigest()])
+            except KeyError:
+                raise Exception(f"Orcale priority map not set correctly for {req.prompt}!!!")
+        
+        logger.info(f"(priority of request {hashlib.md5(req.prompt.encode()).hexdigest()} set as: {req.priority} in context stage")
+
         self.request_outputs[req.request_id] = asyncio.Queue()
         self.request_lifetime_events[req.request_id] = []
         

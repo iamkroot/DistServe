@@ -6,6 +6,8 @@ from distserve.config import ContextStageSchedConfig, ParallelConfig
 from distserve.logger import init_logger
 from distserve.request import Request, BatchedRequests, MigratingRequest
 from distserve.block_manager import BlockManager
+from heapq import heappush, heappop, heapify
+import hashlib
 
 logger = init_logger(__name__)
 
@@ -134,17 +136,11 @@ class ContextStageFCFSScheduler(ContextStageScheduler):
             """
             Check whether the request can be added to the current batch.
             """
-            return (
-                # Limit 1. batch size
-                len(next_batch) < self.sched_config.max_batch_size
-            ) and (
-                # Limit 2. tokens per batch
-                next_batch.get_num_input_tokens()
+            batch_lim = len(next_batch) < self.sched_config.max_batch_size
+            token_lim = (next_batch.get_num_input_tokens()
                 + request.get_num_input_tokens()
-                <= self.sched_config.max_tokens_per_batch
-            ) and (
-                # Limit 3. GPU blocks
-                sum([
+                <= self.sched_config.max_tokens_per_batch)
+            gpu_block_lim = (sum([
                     self._get_block_needed(len(req.prompt_token_ids))
                     for req in next_batch.requests + [request]
                 ]) +
@@ -153,10 +149,20 @@ class ContextStageFCFSScheduler(ContextStageScheduler):
                     for req in self.unaccepted_queue
                 ]) +
                 self.num_on_fly_request_block 
-                <= self.block_manager.max_num_gpu_blocks
+                <= self.block_manager.max_num_gpu_blocks)
+            logger.debug(f"batch_lim: {batch_lim}, token_lim: {token_lim}, gpu_block_lim: {gpu_block_lim}")
+            return (
+                # Limit 1. batch size
+                batch_lim
+            ) and (
+                # Limit 2. tokens per batch
+                token_lim
+            ) and (
+                # Limit 3. GPU blocks
+                gpu_block_lim
             )
-    
         while len(self.waiting_queue) > 0:
+            logger.debug(f"waiting_queue: {len(self.waiting_queue)}")
             request = self.waiting_queue[0]
             if _check_add_to_cur_batch(request):
                 next_batch.add_request(request)
@@ -199,6 +205,99 @@ class ContextStageFCFSScheduler(ContextStageScheduler):
     def print_status(self):
         logger.info(f"(context) {len(self.waiting_queue)} waiting, {len(self.unaccepted_queue)} finished but unaccepted, {self.num_on_fly_request_block} blocks occupied by on-the-fly requests")
 
+
+class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
+    """
+    A priority scheduler.
+    """
+
+    def __init__(
+        self,
+        sched_config: ContextStageSchedConfig, 
+        parallel_config: ParallelConfig,
+        block_manager: BlockManager):
+        
+        assert (
+            sched_config.policy.startswith("priority")
+        ), f"can not initialize a priority scheduler with policy {sched_config.policy}"
+        self.sched_config = sched_config
+        # If the current batch is full, the requests will be put into the waiting queue.
+        self.waiting_queue = []
+        self.parallel_config: List[Request] = copy.deepcopy(parallel_config)
+        self.block_manager = block_manager
+        # Requests that finished the context stage but are not accepted by the decoding stage.
+        self.unaccepted_queue: List[Request] = []
+        # The number of on-the-fly (i.e. processing) request blocks
+        # Adds when calling get_next_batch_and_pop()
+        # Subtracts when calling on_finish_requests()
+        self.num_on_fly_request_block = 0
+
+    def add_request(self, request: Request) -> None:
+        """
+        Add a request to the scheduler.
+        """
+        heappush(self.waiting_queue, (request.priority, id(request), request))
+
+    def get_next_batch_and_pop(self) -> BatchedRequests:
+        """
+        Get the next batch for the context stage based on priority, and pop them
+        """
+        next_batch = BatchedRequests()
+
+        def _check_add_to_cur_batch(request: Request) -> bool:
+            """
+            Check whether the request can be added to the current batch.
+            """
+            batch_lim = len(next_batch) < self.sched_config.max_batch_size
+            token_lim = (next_batch.get_num_input_tokens()
+                + request.get_num_input_tokens()
+                <= self.sched_config.max_tokens_per_batch)
+            gpu_block_lim = (sum([
+                    self._get_block_needed(len(req.prompt_token_ids))
+                    for req in next_batch.requests + [request]
+                ]) +
+                sum([
+                    self._get_block_needed(len(req.prompt_token_ids))
+                    for req in self.unaccepted_queue
+                ]) +
+                self.num_on_fly_request_block 
+                <= self.block_manager.max_num_gpu_blocks)
+            logger.debug(f"batch_lim: {batch_lim}, token_lim: {token_lim}, gpu_block_lim: {gpu_block_lim}")
+            return (
+                # Limit 1. batch size
+                batch_lim
+            ) and (
+                # Limit 2. tokens per batch
+                token_lim
+            ) and (
+                # Limit 3. GPU blocks
+                gpu_block_lim
+            )
+    
+        while len(self.waiting_queue) > 0:
+            logger.debug(f"waiting_queue: {len(self.waiting_queue)}")
+            request = self.waiting_queue[0][2]
+            if _check_add_to_cur_batch(request):
+                logger.info(f"(request {hashlib.md5(request.prompt.encode()).hexdigest()} popped with priority {request.priority} in context stage")
+                next_batch.add_request(request)
+                heappop(self.waiting_queue)
+            else:
+                break
+        
+        self.num_on_fly_request_block += sum([
+            self._get_block_needed(req.get_input_len())
+            for req in next_batch.requests
+        ])
+
+        return next_batch
+            
+    def get_num_waiting_requests(self) -> int:
+        return len(self.waiting_queue)
+    
+    def print_status(self):
+        logger.info(f"(context) {len(self.waiting_queue)} waiting, {len(self.unaccepted_queue)} finished but unaccepted, {self.num_on_fly_request_block} blocks occupied by on-the-fly requests")
+
+
 def get_context_stage_scheduler(
     sched_config: ContextStageSchedConfig,
     parallel_config: ParallelConfig,
@@ -206,6 +305,8 @@ def get_context_stage_scheduler(
 ) -> ContextStageScheduler:
     if sched_config.policy == "fcfs":
         return ContextStageFCFSScheduler(sched_config, parallel_config, block_manager)
+    elif sched_config.policy.startswith("priority"):
+        return ContextStagePriorityScheduler(sched_config, parallel_config, block_manager)
     else:
         raise NotImplementedError(f"Unknown context scheduler policy {sched_config.policy}")
     

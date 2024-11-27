@@ -3,6 +3,7 @@ import copy
 from typing import List, Callable, Tuple
 import warnings
 import torch
+from heapq import heappush, heappop
 
 from distserve.config import ParallelConfig, DecodingStageSchedConfig
 from distserve.logger import init_logger
@@ -267,8 +268,145 @@ def get_decoding_stage_scheduler(
 ) -> DecodingStageScheduler:
     if sched_config.policy == "fcfs":
         return DecodingStageFCFSScheduler(sched_config, parallel_config, block_manager, engine_migrate_block_callback)
+    elif sched_config.policy == "priority-sjf":
+        return DecodingStagePriorityScheduler(sched_config, parallel_config, block_manager, engine_migrate_block_callback)
     else:
         raise NotImplementedError(
             f"scheduler policy {sched_config.policy} is not supported"
         )
         
+
+class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
+    """
+    A priority scheduler.
+    """
+
+    def __init__(
+        self,
+        sched_config: DecodingStageSchedConfig,
+        parallel_config: ParallelConfig,
+        block_manager: BlockManager,
+        engine_migrate_block_callback: Callable,
+    ):
+        assert (
+            sched_config.policy.startswith("priority")
+        ), f"can not initialize a priority scheduler with policy {sched_config.policy}"
+        self.sched_config = sched_config
+        # If the request has not been accepted (i.e. it still resides in the "bridge" queu
+        # and its block are still on the context stage engine's side), then it will be put
+        # into the unaccepted queue.
+        self.unaccepted_queue: List[MigratingRequest] = []
+        # If the current batch is full, the requests will be put into the waiting queue.
+        # this is a priority queue now
+        self.waiting_queue: list[tuple[int, int, Request]] = []
+        # If one request was in batch_queues before, but swapped out, it will be put into the swapped queue.
+        self.swapped_queue: List[Request] = []
+        # Since pipeline parallelism is used, there are multiple batches in the system.
+        self.cur_index = -1
+        self.batch_queues = [
+            BatchedRequests() for i in range(parallel_config.pipeline_parallel_size)
+        ]
+        self.parallel_config = copy.deepcopy(parallel_config)
+        self.block_manager = block_manager
+        self.engine_migrate_block_callback = engine_migrate_block_callback
+
+    def abort_request(self, request_id: int) -> None:
+        # scan the current batch
+        for queue in self.batch_queues:
+            for _, request in enumerate(queue.requests):
+                if request.request_id == request_id:
+                    # This request may be under processed by the model currently,
+                    # so it is not safe to delete it from current batch directly.
+                    # Mark it as finished will release the resources it holds finally.
+                    request.is_finished = True
+                    return
+
+        # scan the waiting queue
+        for i, request in enumerate(self.waiting_queue):
+            if request[2].request_id == request_id:
+                del self.waiting_queue[i]
+                # FIXME: Would need to call heapify again, to ensure sortedness!!
+                raise NotImplementedError
+                    
+    def _check_add_to_cur_batch(self, request: Request) -> bool:
+        return (
+            len(self.batch_queues[self.cur_index]) < self.sched_config.max_batch_size
+        ) and (
+            self.batch_queues[self.cur_index].get_num_input_tokens()
+            + request.get_num_input_tokens()
+            <= self.sched_config.max_tokens_per_batch
+        ) and (
+            sum([
+                sum([
+                    self._get_block_needed(len(req.prompt_token_ids) + req.get_output_len())
+                    for req in self.batch_queues[index].requests
+                ])
+                for index in range(self.parallel_config.pipeline_parallel_size)
+            ]) + sum([
+                self._get_block_needed(len(req[2].prompt_token_ids))
+                for req in self.waiting_queue
+            ]) + self._get_block_needed(request.get_input_len() + request.get_output_len()) \
+                <= self.block_manager.max_num_gpu_blocks
+        )
+
+    def get_next_batch(self) -> BatchedRequests:
+        self.cur_index = (
+            self.cur_index + 1
+        ) % self.parallel_config.pipeline_parallel_size
+
+        # Check whether the blocks on GPU is enough for the next batch.
+        # If not, swap out the last request
+        while sum([
+            sum([
+                self._get_block_needed(req.get_input_len() + req.get_output_len())
+                for req in self.batch_queues[index].requests
+            ])
+            for index in range(self.parallel_config.pipeline_parallel_size)
+        ]) + sum([
+            self._get_block_needed(req[2].get_input_len())
+            for req in self.waiting_queue
+        ]) > self.block_manager.max_num_gpu_blocks:
+            logger.info("No enough GPU blocks. Swap-out triggered")
+            request = self.batch_queues[self.cur_index].requests.pop(-1)
+            self.swapped_queue.append(request)
+            self.block_manager.swap_out_requests([request])
+
+        # Try to add in some new requests. Consider requests in the swapped queue first.
+        while len(self.swapped_queue) > 0 or len(self.waiting_queue) > 0:
+            if len(self.swapped_queue) > 0:
+                request = self.swapped_queue[0]
+                if self._check_add_to_cur_batch(request):
+                    logger.info("Swap-in triggered")
+                    self.block_manager.swap_in_requests([request])
+                    self.batch_queues[self.cur_index].add_request(request)
+                    self.swapped_queue.pop(0)
+                else:
+                    break
+            else:
+                (_, _, request) = heappop(self.waiting_queue)
+                if self._check_add_to_cur_batch(request):
+                    self.batch_queues[self.cur_index].add_request(request)
+                else:
+                    heappush(self.waiting_queue, (request.priority, id(request), request))
+        return self.batch_queues[self.cur_index]
+
+    def __repr__(self) -> str:
+        return (
+            f"PrioritySJF(max_batch_size={self.sched_config.max_batch_size}, "
+            f"max_tokens_per_batch={self.sched_config.max_tokens_per_batch})"
+        )
+    
+    async def post_process(self) -> None:
+        def should_accept(migrating_req: MigratingRequest) -> bool:
+            return sum([self._get_block_needed(len(req[2].prompt_token_ids))
+                        for req in self.waiting_queue
+                    ]) < self.block_manager.max_num_gpu_blocks * self.sched_config.waiting_block_prop_threshold \
+                    and self._get_block_needed(len(migrating_req.req.prompt_token_ids)) <= self.block_manager.get_num_avail_gpu_blocks()
+        while len(self.unaccepted_queue) > 0:
+            migrating_req = self.unaccepted_queue[0]
+            if should_accept(migrating_req):
+                self.unaccepted_queue.pop(0)
+                await self.engine_migrate_block_callback(migrating_req)
+                heappush(self.waiting_queue, (migrating_req.req.priority, id(migrating_req.req), migrating_req.req))
+            else:
+                break

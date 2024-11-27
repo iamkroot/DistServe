@@ -104,7 +104,8 @@ class ContextStageSchedConfig:
         parallel_config: ParallelConfig = None,
     ):
         assert policy in [
-            "fcfs"
+            "fcfs",
+            "priority-sjf",
         ], f"policy {policy} not supported"
         self.policy = policy
         self.max_batch_size = max_batch_size
@@ -133,6 +134,7 @@ class DecodingStageSchedConfig:
             "srpt",
             "mlfq",
             "sj-mlfq",
+            "priority-sjf",
         ], f"policy {policy} not supported"
         self.policy = policy
         self.max_batch_size = max_batch_size
