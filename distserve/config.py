@@ -102,6 +102,7 @@ class ContextStageSchedConfig:
         max_batch_size: int,
         max_tokens_per_batch: int,
         parallel_config: ParallelConfig = None,
+        priority_queue_starvation_bound: int = 20,
     ):
         assert policy in [
             "fcfs",
@@ -111,6 +112,7 @@ class ContextStageSchedConfig:
         self.max_batch_size = max_batch_size
         self.max_tokens_per_batch = max_tokens_per_batch
         self.parallel_config = parallel_config
+        self.priority_queue_starvation_bound = priority_queue_starvation_bound
     
 class DecodingStageSchedConfig:
     """Configuration for the decoding stage scheduler.
@@ -127,7 +129,8 @@ class DecodingStageSchedConfig:
         max_batch_size: int,
         max_tokens_per_batch: int,
         model_name: str = None,
-        waiting_block_prop_threshold: float = 0.05
+        waiting_block_prop_threshold: float = 0.05,
+        priority_queue_starvation_bound: int = 20,
     ):
         assert policy in [
             "fcfs",
@@ -141,6 +144,7 @@ class DecodingStageSchedConfig:
         self.max_tokens_per_batch = max_tokens_per_batch
         self.model_name = model_name
         self.waiting_block_prop_threshold = waiting_block_prop_threshold
+        self.priority_queue_starvation_bound = priority_queue_starvation_bound
 
 _TORCH_DTYPE_MAP = {"fp16": torch.half, "fp32": torch.float32}
 

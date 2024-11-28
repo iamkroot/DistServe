@@ -112,6 +112,7 @@ class AsyncLLM:
         decoding_sched_config: DecodingStageSchedConfig,
         algo_config: AlgoConfig
     ):
+        print(algo_config)
         self.engine = LLMEngine(
             model_config,
             disagg_parallel_config,
@@ -153,14 +154,16 @@ class AsyncLLM:
             context_sched_config=ContextStageSchedConfig(
                 policy=args.context_sched_policy,
                 max_batch_size=args.context_max_batch_size,
-                max_tokens_per_batch=args.context_max_tokens_per_batch
+                max_tokens_per_batch=args.context_max_tokens_per_batch,
+                priority_queue_starvation_bound=args.context_priority_queue_starvation_bound
             ),
             decoding_sched_config=DecodingStageSchedConfig(
                 policy=args.decoding_sched_policy,
                 max_batch_size=args.decoding_max_batch_size,
                 max_tokens_per_batch=args.decoding_max_tokens_per_batch,
                 model_name=args.model,
-                waiting_block_prop_threshold=0.05
+                waiting_block_prop_threshold=0.05,
+                priority_queue_starvation_bound=args.decoding_priority_queue_starvation_bound
             ),
             algo_config=AlgoConfig(priority_sjf_oracle_path=args.priority_sjf_oracle_path)
         )

@@ -10,6 +10,7 @@ from distserve.logger import init_logger
 from distserve.request import Request, BatchedRequests, MigratingRequest
 from distserve.profiling import ProfilingDatabase
 from distserve.block_manager import BlockManager, BlockLocation
+from distserve.sjf_queue import BoundedStarvationPriorityQueue
 
 logger = init_logger(__name__)
 
@@ -298,7 +299,8 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
         self.unaccepted_queue: List[MigratingRequest] = []
         # If the current batch is full, the requests will be put into the waiting queue.
         # this is a priority queue now
-        self.waiting_queue: list[tuple[int, int, Request]] = []
+        self.waiting_queue: BoundedStarvationPriorityQueue = \
+            BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound)
         # If one request was in batch_queues before, but swapped out, it will be put into the swapped queue.
         self.swapped_queue: List[Request] = []
         # Since pipeline parallelism is used, there are multiple batches in the system.
@@ -322,12 +324,9 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
                     return
 
         # scan the waiting queue
-        for i, request in enumerate(self.waiting_queue):
-            if request[2].request_id == request_id:
-                del self.waiting_queue[i]
-                # FIXME: Would need to call heapify again, to ensure sortedness!!
-                raise NotImplementedError
-                    
+        # TODO: Need to allow deleting arbitrary requests from the priority queue
+        raise NotImplementedError
+
     def _check_add_to_cur_batch(self, request: Request) -> bool:
         return (
             len(self.batch_queues[self.cur_index]) < self.sched_config.max_batch_size
@@ -343,7 +342,7 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
                 ])
                 for index in range(self.parallel_config.pipeline_parallel_size)
             ]) + sum([
-                self._get_block_needed(len(req[2].prompt_token_ids))
+                self._get_block_needed(len(req.prompt_token_ids))
                 for req in self.waiting_queue
             ]) + self._get_block_needed(request.get_input_len() + request.get_output_len()) \
                 <= self.block_manager.max_num_gpu_blocks
@@ -363,7 +362,7 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
             ])
             for index in range(self.parallel_config.pipeline_parallel_size)
         ]) + sum([
-            self._get_block_needed(req[2].get_input_len())
+            self._get_block_needed(req.get_input_len())
             for req in self.waiting_queue
         ]) > self.block_manager.max_num_gpu_blocks:
             logger.info("No enough GPU blocks. Swap-out triggered")
@@ -383,11 +382,12 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
                 else:
                     break
             else:
-                (_, _, request) = heappop(self.waiting_queue)
+                request = self.waiting_queue.top()
                 if self._check_add_to_cur_batch(request):
                     self.batch_queues[self.cur_index].add_request(request)
+                    self.waiting_queue.pop()
                 else:
-                    heappush(self.waiting_queue, (request.priority, id(request), request))
+                    break
         return self.batch_queues[self.cur_index]
 
     def __repr__(self) -> str:
@@ -398,7 +398,7 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
     
     async def post_process(self) -> None:
         def should_accept(migrating_req: MigratingRequest) -> bool:
-            return sum([self._get_block_needed(len(req[2].prompt_token_ids))
+            return sum([self._get_block_needed(len(req.prompt_token_ids))
                         for req in self.waiting_queue
                     ]) < self.block_manager.max_num_gpu_blocks * self.sched_config.waiting_block_prop_threshold \
                     and self._get_block_needed(len(migrating_req.req.prompt_token_ids)) <= self.block_manager.get_num_avail_gpu_blocks()
@@ -407,6 +407,6 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
             if should_accept(migrating_req):
                 self.unaccepted_queue.pop(0)
                 await self.engine_migrate_block_callback(migrating_req)
-                heappush(self.waiting_queue, (migrating_req.req.priority, id(migrating_req.req), migrating_req.req))
+                self.waiting_queue.add(migrating_req.req)
             else:
                 break

@@ -6,8 +6,9 @@ from distserve.config import ContextStageSchedConfig, ParallelConfig
 from distserve.logger import init_logger
 from distserve.request import Request, BatchedRequests, MigratingRequest
 from distserve.block_manager import BlockManager
-from heapq import heappush, heappop, heapify
+from distserve.sjf_queue import BoundedStarvationPriorityQueue
 import hashlib
+
 
 logger = init_logger(__name__)
 
@@ -222,7 +223,8 @@ class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
         ), f"can not initialize a priority scheduler with policy {sched_config.policy}"
         self.sched_config = sched_config
         # If the current batch is full, the requests will be put into the waiting queue.
-        self.waiting_queue = []
+        self.waiting_queue: BoundedStarvationPriorityQueue = \
+            BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound)
         self.parallel_config: List[Request] = copy.deepcopy(parallel_config)
         self.block_manager = block_manager
         # Requests that finished the context stage but are not accepted by the decoding stage.
@@ -236,7 +238,7 @@ class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
         """
         Add a request to the scheduler.
         """
-        heappush(self.waiting_queue, (request.priority, id(request), request))
+        self.waiting_queue.add(request)
 
     def get_next_batch_and_pop(self) -> BatchedRequests:
         """
@@ -276,11 +278,11 @@ class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
     
         while len(self.waiting_queue) > 0:
             logger.debug(f"waiting_queue: {len(self.waiting_queue)}")
-            request = self.waiting_queue[0][2]
+            request = self.waiting_queue.top()
             if _check_add_to_cur_batch(request):
-                logger.info(f"(request {hashlib.md5(request.prompt.encode()).hexdigest()} popped with priority {request.priority} in context stage")
+                logger.debug(f"(request {hashlib.md5(request.prompt.encode()).hexdigest()}) popped with priority {request.priority} in context stage")
                 next_batch.add_request(request)
-                heappop(self.waiting_queue)
+                self.waiting_queue.pop()
             else:
                 break
         
@@ -291,12 +293,6 @@ class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
 
         return next_batch
             
-    def get_num_waiting_requests(self) -> int:
-        return len(self.waiting_queue)
-    
-    def print_status(self):
-        logger.info(f"(context) {len(self.waiting_queue)} waiting, {len(self.unaccepted_queue)} finished but unaccepted, {self.num_on_fly_request_block} blocks occupied by on-the-fly requests")
-
 
 def get_context_stage_scheduler(
     sched_config: ContextStageSchedConfig,
