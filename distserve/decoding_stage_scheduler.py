@@ -10,7 +10,7 @@ from distserve.logger import init_logger
 from distserve.request import Request, BatchedRequests, MigratingRequest
 from distserve.profiling import ProfilingDatabase
 from distserve.block_manager import BlockManager, BlockLocation
-from distserve.sjf_queue import BoundedStarvationPriorityQueue
+from distserve.sjf_queue import BoundedStarvationPriorityQueue, DirectPriorityQueue
 
 logger = init_logger(__name__)
 
@@ -269,7 +269,7 @@ def get_decoding_stage_scheduler(
 ) -> DecodingStageScheduler:
     if sched_config.policy == "fcfs":
         return DecodingStageFCFSScheduler(sched_config, parallel_config, block_manager, engine_migrate_block_callback)
-    elif sched_config.policy == "priority-sjf":
+    elif sched_config.policy.startswith("priority"):
         return DecodingStagePriorityScheduler(sched_config, parallel_config, block_manager, engine_migrate_block_callback)
     else:
         raise NotImplementedError(
@@ -296,11 +296,15 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
         # If the request has not been accepted (i.e. it still resides in the "bridge" queu
         # and its block are still on the context stage engine's side), then it will be put
         # into the unaccepted queue.
-        self.unaccepted_queue: List[MigratingRequest] = []
+        self.unaccepted_queue: BoundedStarvationPriorityQueue[MigratingRequest] | DirectPriorityQueue[MigratingRequest] = \
+            BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound, 'decoding') \
+            if self.sched_config.policy == "priority-bounded-sjf" else DirectPriorityQueue('decoding')
         # If the current batch is full, the requests will be put into the waiting queue.
         # this is a priority queue now
-        self.waiting_queue: BoundedStarvationPriorityQueue = \
-            BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound)
+        self.waiting_queue = []
+        # self.waiting_queue: BoundedStarvationPriorityQueue | DirectPriorityQueue = \
+        #     BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound, 'decoding') \
+        #     if self.sched_config.policy == "priority-bounded-sjf" else DirectPriorityQueue('decoding')
         # If one request was in batch_queues before, but swapped out, it will be put into the swapped queue.
         self.swapped_queue: List[Request] = []
         # Since pipeline parallelism is used, there are multiple batches in the system.
@@ -312,83 +316,87 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
         self.block_manager = block_manager
         self.engine_migrate_block_callback = engine_migrate_block_callback
 
-    def abort_request(self, request_id: int) -> None:
-        # scan the current batch
-        for queue in self.batch_queues:
-            for _, request in enumerate(queue.requests):
-                if request.request_id == request_id:
-                    # This request may be under processed by the model currently,
-                    # so it is not safe to delete it from current batch directly.
-                    # Mark it as finished will release the resources it holds finally.
-                    request.is_finished = True
-                    return
+    # def abort_request(self, request_id: int) -> None:
+    #     # scan the current batch
+    #     for queue in self.batch_queues:
+    #         for _, request in enumerate(queue.requests):
+    #             if request.request_id == request_id:
+    #                 # This request may be under processed by the model currently,
+    #                 # so it is not safe to delete it from current batch directly.
+    #                 # Mark it as finished will release the resources it holds finally.
+    #                 request.is_finished = True
+    #                 return
 
-        # scan the waiting queue
-        # TODO: Need to allow deleting arbitrary requests from the priority queue
-        raise NotImplementedError
+    #     # scan the waiting queue
+    #     # TODO: Need to allow deleting arbitrary requests from the priority queue
+    #     raise NotImplementedError
 
-    def _check_add_to_cur_batch(self, request: Request) -> bool:
-        return (
-            len(self.batch_queues[self.cur_index]) < self.sched_config.max_batch_size
-        ) and (
-            self.batch_queues[self.cur_index].get_num_input_tokens()
-            + request.get_num_input_tokens()
-            <= self.sched_config.max_tokens_per_batch
-        ) and (
-            sum([
-                sum([
-                    self._get_block_needed(len(req.prompt_token_ids) + req.get_output_len())
-                    for req in self.batch_queues[index].requests
-                ])
-                for index in range(self.parallel_config.pipeline_parallel_size)
-            ]) + sum([
-                self._get_block_needed(len(req.prompt_token_ids))
-                for req in self.waiting_queue
-            ]) + self._get_block_needed(request.get_input_len() + request.get_output_len()) \
-                <= self.block_manager.max_num_gpu_blocks
-        )
+    async def add_request(self, migrating_req: MigratingRequest) -> None:
+        # We take a simple approach here: Accept any request that comes in.
+        self.unaccepted_queue.add(migrating_req)
 
-    def get_next_batch(self) -> BatchedRequests:
-        self.cur_index = (
-            self.cur_index + 1
-        ) % self.parallel_config.pipeline_parallel_size
+    # def _check_add_to_cur_batch(self, request: Request) -> bool:
+    #     return (
+    #         len(self.batch_queues[self.cur_index]) < self.sched_config.max_batch_size
+    #     ) and (
+    #         self.batch_queues[self.cur_index].get_num_input_tokens()
+    #         + request.get_num_input_tokens()
+    #         <= self.sched_config.max_tokens_per_batch
+    #     ) and (
+    #         sum([
+    #             sum([
+    #                 self._get_block_needed(len(req.prompt_token_ids) + req.get_output_len())
+    #                 for req in self.batch_queues[index].requests
+    #             ])
+    #             for index in range(self.parallel_config.pipeline_parallel_size)
+    #         ]) + sum([
+    #             self._get_block_needed(len(req.prompt_token_ids))
+    #             for req in self.waiting_queue
+    #         ]) + self._get_block_needed(request.get_input_len() + request.get_output_len()) \
+    #             <= self.block_manager.max_num_gpu_blocks
+    #     )
 
-        # Check whether the blocks on GPU is enough for the next batch.
-        # If not, swap out the last request
-        while sum([
-            sum([
-                self._get_block_needed(req.get_input_len() + req.get_output_len())
-                for req in self.batch_queues[index].requests
-            ])
-            for index in range(self.parallel_config.pipeline_parallel_size)
-        ]) + sum([
-            self._get_block_needed(req.get_input_len())
-            for req in self.waiting_queue
-        ]) > self.block_manager.max_num_gpu_blocks:
-            logger.info("No enough GPU blocks. Swap-out triggered")
-            request = self.batch_queues[self.cur_index].requests.pop(-1)
-            self.swapped_queue.append(request)
-            self.block_manager.swap_out_requests([request])
+    # def get_next_batch(self) -> BatchedRequests:
+    #     self.cur_index = (
+    #         self.cur_index + 1
+    #     ) % self.parallel_config.pipeline_parallel_size
 
-        # Try to add in some new requests. Consider requests in the swapped queue first.
-        while len(self.swapped_queue) > 0 or len(self.waiting_queue) > 0:
-            if len(self.swapped_queue) > 0:
-                request = self.swapped_queue[0]
-                if self._check_add_to_cur_batch(request):
-                    logger.info("Swap-in triggered")
-                    self.block_manager.swap_in_requests([request])
-                    self.batch_queues[self.cur_index].add_request(request)
-                    self.swapped_queue.pop(0)
-                else:
-                    break
-            else:
-                request = self.waiting_queue.top()
-                if self._check_add_to_cur_batch(request):
-                    self.batch_queues[self.cur_index].add_request(request)
-                    self.waiting_queue.pop()
-                else:
-                    break
-        return self.batch_queues[self.cur_index]
+    #     # Check whether the blocks on GPU is enough for the next batch.
+    #     # If not, swap out the last request
+    #     while sum([
+    #         sum([
+    #             self._get_block_needed(req.get_input_len() + req.get_output_len())
+    #             for req in self.batch_queues[index].requests
+    #         ])
+    #         for index in range(self.parallel_config.pipeline_parallel_size)
+    #     ]) + sum([
+    #         self._get_block_needed(req.get_input_len())
+    #         for req in self.waiting_queue
+    #     ]) > self.block_manager.max_num_gpu_blocks:
+    #         logger.info("No enough GPU blocks. Swap-out triggered")
+    #         request = self.batch_queues[self.cur_index].requests.pop(-1)
+    #         self.swapped_queue.append(request)
+    #         self.block_manager.swap_out_requests([request])
+
+    #     # Try to add in some new requests. Consider requests in the swapped queue first.
+    #     while len(self.swapped_queue) > 0 or len(self.waiting_queue) > 0:
+    #         if len(self.swapped_queue) > 0:
+    #             request = self.swapped_queue[0]
+    #             if self._check_add_to_cur_batch(request):
+    #                 logger.info("Swap-in triggered")
+    #                 self.block_manager.swap_in_requests([request])
+    #                 self.batch_queues[self.cur_index].add_request(request)
+    #                 self.swapped_queue.pop(0)
+    #             else:
+    #                 break
+    #         else:
+    #             request = self.waiting_queue[0]
+    #             if self._check_add_to_cur_batch(request):
+    #                 self.batch_queues[self.cur_index].add_request(request)
+    #                 self.waiting_queue.pop(0)
+    #             else:
+    #                 break
+    #     return self.batch_queues[self.cur_index]
 
     def __repr__(self) -> str:
         return (
@@ -403,10 +411,10 @@ class DecodingStagePriorityScheduler(DecodingStageFCFSScheduler):
                     ]) < self.block_manager.max_num_gpu_blocks * self.sched_config.waiting_block_prop_threshold \
                     and self._get_block_needed(len(migrating_req.req.prompt_token_ids)) <= self.block_manager.get_num_avail_gpu_blocks()
         while len(self.unaccepted_queue) > 0:
-            migrating_req = self.unaccepted_queue[0]
+            migrating_req = self.unaccepted_queue.top()
             if should_accept(migrating_req):
-                self.unaccepted_queue.pop(0)
+                self.unaccepted_queue.pop()
                 await self.engine_migrate_block_callback(migrating_req)
-                self.waiting_queue.add(migrating_req.req)
+                self.waiting_queue.append(migrating_req.req)
             else:
                 break

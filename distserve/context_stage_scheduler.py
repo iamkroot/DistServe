@@ -6,7 +6,7 @@ from distserve.config import ContextStageSchedConfig, ParallelConfig
 from distserve.logger import init_logger
 from distserve.request import Request, BatchedRequests, MigratingRequest
 from distserve.block_manager import BlockManager
-from distserve.sjf_queue import BoundedStarvationPriorityQueue
+from distserve.sjf_queue import BoundedStarvationPriorityQueue, DirectPriorityQueue
 import hashlib
 
 
@@ -223,8 +223,9 @@ class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
         ), f"can not initialize a priority scheduler with policy {sched_config.policy}"
         self.sched_config = sched_config
         # If the current batch is full, the requests will be put into the waiting queue.
-        self.waiting_queue: BoundedStarvationPriorityQueue = \
-            BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound)
+        self.waiting_queue: BoundedStarvationPriorityQueue | DirectPriorityQueue = \
+            BoundedStarvationPriorityQueue(sched_config.priority_queue_starvation_bound, 'context') \
+            if self.sched_config.policy == "priority-bounded-sjf" else DirectPriorityQueue('context')
         self.parallel_config: List[Request] = copy.deepcopy(parallel_config)
         self.block_manager = block_manager
         # Requests that finished the context stage but are not accepted by the decoding stage.
@@ -280,7 +281,7 @@ class ContextStagePriorityScheduler(ContextStageFCFSScheduler):
             logger.debug(f"waiting_queue: {len(self.waiting_queue)}")
             request = self.waiting_queue.top()
             if _check_add_to_cur_batch(request):
-                logger.debug(f"(request {hashlib.md5(request.prompt.encode()).hexdigest()}) popped with priority {request.priority} in context stage")
+                logger.debug(f"(context) request {hashlib.md5(request.prompt.encode()).hexdigest()}) popped with priority {request.priority} in context stage")
                 next_batch.add_request(request)
                 self.waiting_queue.pop()
             else:

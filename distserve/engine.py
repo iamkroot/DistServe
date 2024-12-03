@@ -150,7 +150,7 @@ class LLMEngine:
         self.request_lifetime_events: Dict[int, List[LifetimeEvent]] = {}
         
         self.engine_initialized = False
-        if self.context_sched_config.policy == "priority-sjf" or self.decoding_sched_config.policy == "priority-sjf":
+        if self.context_sched_config.policy.startswith("priority") or self.decoding_sched_config.policy.startswith("priority"):
             assert algo_config.priority_sjf_oracle_path is not None
             with open(algo_config.priority_sjf_oracle_path, 'rb') as f:
                 self.priority_map = pickle.load(f)
@@ -287,7 +287,7 @@ class LLMEngine:
             arrival_time,
             request_id,
         )
-        if self.context_sched_config.policy == "priority-sjf" or self.decoding_sched_config.policy == "priority-sjf":
+        if self.context_sched_config.policy.startswith("priority") or self.decoding_sched_config.policy.startswith("priority"):
             try:
                 req.set_priority(self.priority_map[hashlib.md5(req.prompt.encode()).hexdigest()])
             except KeyError:
