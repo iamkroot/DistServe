@@ -22,11 +22,13 @@ def sample_requests(dataset_path: str, num_prompts: int) -> List[TestRequest]:
     """
     sample_requests: Sample the given number of requests from the dataset.
     """
+    random.seed(42)
     dataset = Dataset.load(dataset_path)
     if num_prompts > len(dataset.reqs):
         raise ValueError(
             f"Number of prompts ({num_prompts}) is larger than the dataset size ({len(dataset.reqs)})."
         )
+    # return [dataset.reqs[i] for i in range(1)]
     return random.sample(dataset.reqs, num_prompts)
 
 
@@ -213,6 +215,7 @@ async def benchmark(
         )
         tasks.append(task)
     request_results = await asyncio.gather(*tasks)
+    assert len(request_results) == len(input_requests)
     return request_results
 
 
