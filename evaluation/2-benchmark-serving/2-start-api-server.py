@@ -9,6 +9,8 @@ import multiprocessing
 
 from backends import BACKEND_TO_PORTS
 
+ORACLE_PATH = "2-benchmark-serving/oracle.pkl"
+
 MODEL_TO_PARALLEL_PARAMS = {
     "facebook/opt-125m": {
         "vllm": 1,
@@ -28,7 +30,7 @@ MODEL_TO_PARALLEL_PARAMS = {
     "facebook/opt-13b": {
         "vllm": 1,
         "deepspeed": 1,
-        "distserve": (2, 1, 1, 1)   # TODO adjust me
+        "distserve": (1, 1, 1, 1)   # TODO adjust me
     },
     "facebook/opt-66b": {
         "vllm": 4,
@@ -87,8 +89,8 @@ python -m mii.entrypoints.api_server \\
     elif args.backend == "distserve":
         context_tp, context_pp, decoding_tp, decoding_pp = MODEL_TO_PARALLEL_PARAMS[args.model]["distserve"]
         script = f"""
-conda activate distserve;
-python -m distserve.api_server.distserve_api_server \\
+# conda activate distserve;
+conda run -n distserve --live-stream python -m distserve.api_server.distserve_api_server \\
     --host 0.0.0.0 \\
     --port {port} \\
     --model {args.model} \\
@@ -105,17 +107,19 @@ python -m distserve.api_server.distserve_api_server \\
     --gpu-memory-utilization 0.95 \\
     --swap-space 16 \\
     \\
-    --context-sched-policy fcfs \\
+    --context-sched-policy {args.context_sched_policy} \\
     --context-max-batch-size 128 \\
     --context-max-tokens-per-batch 8192 \\
     \\
-    --decoding-sched-policy fcfs \\
+    --decoding-sched-policy {args.decoding_sched_policy} \\
     --decoding-max-batch-size 1024 \\
-    --decoding-max-tokens-per-batch 65536
+    --decoding-max-tokens-per-batch 65536 \\
+    \\
+    --priority-sjf-oracle-path {ORACLE_PATH} \\
 """
     
     print(f"Starting server with command {script}")
-    subprocess.run(["fish", "-c", script])
+    subprocess.call(["zsh", "-c", script])
 
 
 def metadata_server_process(port, args: argparse.Namespace):
@@ -169,7 +173,16 @@ if __name__ == "__main__":
         required=True,
         help="The model to be served"
     )
-    
+    parser.add_argument(
+        "--context-sched-policy",
+        choices=["fcfs", "priority-sjf", "priority-bounded-sjf"],
+        default="fcfs",
+    )
+    parser.add_argument(
+        "--decoding-sched-policy",
+        choices=["fcfs", "priority-sjf", "priority-bounded-sjf"],
+        default="fcfs",
+    )
     args = parser.parse_args()
     main(args)
     
