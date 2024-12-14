@@ -110,10 +110,12 @@ conda run -n distserve --live-stream python -m distserve.api_server.distserve_ap
     --context-sched-policy {args.context_sched_policy} \\
     --context-max-batch-size 128 \\
     --context-max-tokens-per-batch 8192 \\
+    --context-priority-queue-starvation-bound {args.context_priority_queue_starvation_bound} \\
     \\
     --decoding-sched-policy {args.decoding_sched_policy} \\
     --decoding-max-batch-size 1024 \\
     --decoding-max-tokens-per-batch 65536 \\
+    --decoding-priority-queue-starvation-bound {args.decoding_priority_queue_starvation_bound} \\
     \\
     --priority-sjf-oracle-path {ORACLE_PATH} \\
 """
@@ -183,6 +185,8 @@ if __name__ == "__main__":
         choices=["fcfs", "priority-sjf", "priority-bounded-sjf"],
         default="fcfs",
     )
+    parser.add_argument("--context-priority-queue-starvation-bound", type=int, default=20)
+    parser.add_argument("--decoding-priority-queue-starvation-bound", type=int, default=20)
     args = parser.parse_args()
     main(args)
     
