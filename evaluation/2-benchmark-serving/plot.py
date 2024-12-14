@@ -326,7 +326,7 @@ def get_request_total_time_client(request_results: list[RequestResult], exp_resu
 
 def plot_individual_request_latency(
     exp_result_dirs: list[str],
-    num_prompts_req_rates: list[(int, float)],
+    num_prompts_req_rates: list[tuple[int, float]],
     view: str,
     backend: Backend
 ):
@@ -380,11 +380,11 @@ def plot_individual_request_latency(
 def plot_fig12():
     # fig, axs = plt.subplots(1, 2, figsize=(10, 3))
     plot_individual_request_latency(
-        ["opt-13b-fcfs-context-fcfs-decode-500-5-1111", "opt-13b-priority-sjf-context-priority-sjf-decode-500-5-1111"],
+        ["opt-13b-fcfs-context-fcfs-decode-batch1-1111", "opt-13b-priority-sjf-context-priority-sjf-decode-batch1-1111"],
         [
-            (500, 5)
+            (50, 5)
         ],
-        "client",
+        "server",
         Backend("distserve", SYSNAME, "C0", 1)
     )
 
@@ -411,7 +411,7 @@ def get_stage_start_time(request_results: list[RequestResult], stage: str) -> np
 
 def plot_context_begin_timestamp(
     exp_result_dir: str,
-    num_prompts_req_rates: list[(int, float)],
+    num_prompts_req_rates: list[tuple[int, float]],
     stage: str,
     backend: Backend
 ):
@@ -434,19 +434,21 @@ def plot_context_begin_timestamp(
         ax.set_xlabel(f"{stage} Start Time")
         ax.set_ylabel("Output Length")
         fig.tight_layout()
-        plt.savefig(f'../docs/plots/policy_comparison/fcfs_{stage}_start_v_output_len_({num_prompts},{req_rate}).png', dpi=400)
+        plt.savefig(f'../docs/plots/policy_comparison/fcfs_batch1_{stage}_start_v_output_len_({num_prompts},{req_rate}).png', dpi=400)
 
 
 
 def plot_fig13():
     # fig, axs = plt.subplots(1, 2, figsize=(10, 3))
     plot_context_begin_timestamp(
-        "opt-13b-fcfs-context-fcfs-decode-500-10-1111",
+        "opt-13b-fcfs-context-fcfs-decode-batch1-1111",
         [
-            (500, 10)
+            (50, 5)
         ],
         "context",
         Backend("distserve", SYSNAME, "C0", 1)
     )
 
-# plot_fig13()
+plot_fig13()
+
+# %%
