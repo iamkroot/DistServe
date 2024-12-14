@@ -178,3 +178,5 @@ cython_debug/
 #.idea/
 .DS_Store
 .idea
+
+**/offline_sharegpt_*.json
